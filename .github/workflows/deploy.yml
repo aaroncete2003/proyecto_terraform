@@ -1,0 +1,58 @@
+name: 'Desplegar Infraestructura Service Bus'
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+
+jobs:
+  terraform:
+    name: 'Terraform'
+    runs-on: ubuntu-latest
+    
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./terraform
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.0
+          terraform_wrapper: false
+          
+      - name: Terraform Format Check
+        run: terraform fmt -check
+        continue-on-error: true
+        
+      - name: Terraform Init
+        run: terraform init
+        
+      - name: Terraform Validate
+        run: terraform validate
+        
+      - name: Terraform Plan
+        run: terraform plan -no-color
+        
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main'
+        run: terraform apply -auto-approve
+        
+      - name: Output Infrastructure Info
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "## 🚀 Infraestructura Desplegada" >> $GITHUB_STEP_SUMMARY
+          echo "- **Grupo de Recursos:** $(terraform output -raw resource_group_name)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service Bus:** $(terraform output -raw service_bus_namespace)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Function App:** $(terraform output -raw function_app_name)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Storage Account:** $(terraform output -raw storage_account_name)" >> $GITHUB_STEP_SUMMARY
