@@ -25,6 +25,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         
+      - name: Autenticación en Azure
+        run: |
+          az login --service-principal \
+          -u $ARM_CLIENT_ID \
+          -p $ARM_CLIENT_SECRET \
+          --tenant $ARM_TENANT_ID
+          
+      - name: Verificar suscripción
+        run: az account show
+        
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
