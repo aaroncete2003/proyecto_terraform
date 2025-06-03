@@ -19,7 +19,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: ./proyecto_terraform
+        working-directory: "C:/Users/ADM/Desktop/Terraform --/proyecto_terraform"
     
     steps:
       - name: Checkout
