@@ -13,7 +13,7 @@ terraform {
 
 provider "azurerm" {
   features {}
-  subscription_id = "d537b422-3706-4fe5-b637-b3d2b01cabff"
+  
 }
 
 # Generar sufijo único
