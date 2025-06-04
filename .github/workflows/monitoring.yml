@@ -1,9 +1,12 @@
 name: 'Monitoreo Sistema Service Bus'
-
 on:
   schedule:
     - cron: '0 */6 * * *'  # Cada 6 horas
   workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
 
 env:
   RESOURCE_GROUP: rg-messaging-dev  # Cambiar según tu configuración
@@ -16,18 +19,18 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Login Azure
+      - name: Checkout code
+        uses: actions/checkout@v4
+            
+      - name: Azure Login with OIDC
         uses: azure/login@v1
         with:
-          creds: |
-            {
-              "clientId": "${{ secrets.AZURE_CLIENT_ID }}",
-              "clientSecret": "${{ secrets.AZURE_CLIENT_SECRET }}",
-              "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
-              "tenantId": "${{ secrets.AZURE_TENANT_ID }}"
-            }
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
             
       - name: Check Service Bus Status
+        id: servicebus-check
         run: |
           echo "🔍 Verificando Service Bus..."
           
@@ -36,12 +39,21 @@ jobs:
             --resource-group ${{ env.RESOURCE_GROUP }} \
             --query "[0].name" -o tsv)
           
+          if [ -z "$NAMESPACE" ]; then
+            echo "❌ No se encontró Service Bus Namespace"
+            echo "servicebus_status=NotFound" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
           STATUS=$(az servicebus namespace show \
             --name $NAMESPACE \
             --resource-group ${{ env.RESOURCE_GROUP }} \
             --query "status" -o tsv)
           
+          echo "Service Bus Namespace: $NAMESPACE"
           echo "Service Bus Status: $STATUS"
+          echo "servicebus_name=$NAMESPACE" >> $GITHUB_OUTPUT
+          echo "servicebus_status=$STATUS" >> $GITHUB_OUTPUT
           
           if [ "$STATUS" = "Active" ]; then
             echo "✅ Service Bus está funcionando correctamente"
@@ -51,6 +63,7 @@ jobs:
           fi
           
       - name: Check Function App Status
+        id: functionapp-check
         run: |
           echo "🔍 Verificando Function App..."
           
@@ -58,26 +71,129 @@ jobs:
             --resource-group ${{ env.RESOURCE_GROUP }} \
             --query "[0].name" -o tsv)
           
+          if [ -z "$FUNC_NAME" ]; then
+            echo "❌ No se encontró Function App"
+            echo "functionapp_status=NotFound" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
           STATUS=$(az functionapp show \
             --name $FUNC_NAME \
             --resource-group ${{ env.RESOURCE_GROUP }} \
             --query "state" -o tsv)
           
+          echo "Function App Name: $FUNC_NAME"
           echo "Function App Status: $STATUS"
+          echo "functionapp_name=$FUNC_NAME" >> $GITHUB_OUTPUT
+          echo "functionapp_status=$STATUS" >> $GITHUB_OUTPUT
           
           if [ "$STATUS" = "Running" ]; then
             echo "✅ Function App está funcionando correctamente"
           else
             echo "⚠️ Function App no está ejecutándose, reiniciando..."
             az functionapp restart --name $FUNC_NAME --resource-group ${{ env.RESOURCE_GROUP }}
+            
+            # Esperar un momento y verificar nuevamente
+            sleep 30
+            NEW_STATUS=$(az functionapp show \
+              --name $FUNC_NAME \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --query "state" -o tsv)
+            echo "Function App Status después de reinicio: $NEW_STATUS"
+            echo "functionapp_status_after_restart=$NEW_STATUS" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check Queue Metrics
+        id: queue-metrics
+        run: |
+          echo "🔍 Verificando métricas de colas..."
+          
+          NAMESPACE=${{ steps.servicebus-check.outputs.servicebus_name }}
+          
+          # Obtener lista de colas
+          QUEUES=$(az servicebus queue list \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --namespace-name $NAMESPACE \
+            --query "[].name" -o tsv)
+          
+          echo "Colas encontradas: $QUEUES"
+          
+          TOTAL_MESSAGES=0
+          QUEUE_COUNT=0
+          
+          for QUEUE in $QUEUES; do
+            MESSAGE_COUNT=$(az servicebus queue show \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --namespace-name $NAMESPACE \
+              --name $QUEUE \
+              --query "messageCount" -o tsv)
+            
+            echo "Cola '$QUEUE': $MESSAGE_COUNT mensajes"
+            TOTAL_MESSAGES=$((TOTAL_MESSAGES + MESSAGE_COUNT))
+            QUEUE_COUNT=$((QUEUE_COUNT + 1))
+          done
+          
+          echo "total_messages=$TOTAL_MESSAGES" >> $GITHUB_OUTPUT
+          echo "queue_count=$QUEUE_COUNT" >> $GITHUB_OUTPUT
+          
+          if [ $TOTAL_MESSAGES -gt 1000 ]; then
+            echo "⚠️ Número alto de mensajes pendientes: $TOTAL_MESSAGES"
+          else
+            echo "✅ Número de mensajes dentro del rango normal: $TOTAL_MESSAGES"
           fi
           
       - name: Generate Report
+        if: always()
         run: |
           echo "## 📊 Reporte de Monitoreo - $(date)" >> $GITHUB_STEP_SUMMARY
-          echo "### Estado de Servicios:" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Service Bus: Activo" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Function App: Ejecutándose" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Monitoreo: Funcionando" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔧 Configuración:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Grupo de Recursos:** ${{ env.RESOURCE_GROUP }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Proyecto:** ${{ env.PROJECT_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Ambiente:** ${{ env.ENVIRONMENT }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Próxima verificación:** $(date -d '+6 hours')" >> $GITHUB_STEP_SUMMARY
+          echo "### 📈 Estado de Servicios:" >> $GITHUB_STEP_SUMMARY
+          
+          # Service Bus Status
+          SB_STATUS="${{ steps.servicebus-check.outputs.servicebus_status }}"
+          SB_NAME="${{ steps.servicebus-check.outputs.servicebus_name }}"
+          if [ "$SB_STATUS" = "Active" ]; then
+            echo "- ✅ **Service Bus** ($SB_NAME): Activo" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ❌ **Service Bus** ($SB_NAME): $SB_STATUS" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Function App Status
+          FA_STATUS="${{ steps.functionapp-check.outputs.functionapp_status }}"
+          FA_NAME="${{ steps.functionapp-check.outputs.functionapp_name }}"
+          FA_RESTART_STATUS="${{ steps.functionapp-check.outputs.functionapp_status_after_restart }}"
+          
+          if [ "$FA_STATUS" = "Running" ]; then
+            echo "- ✅ **Function App** ($FA_NAME): Ejecutándose" >> $GITHUB_STEP_SUMMARY
+          elif [ -n "$FA_RESTART_STATUS" ]; then
+            echo "- 🔄 **Function App** ($FA_NAME): Reiniciado - Estado: $FA_RESTART_STATUS" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ❌ **Function App** ($FA_NAME): $FA_STATUS" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Queue Metrics
+          TOTAL_MSG="${{ steps.queue-metrics.outputs.total_messages }}"
+          QUEUE_COUNT="${{ steps.queue-metrics.outputs.queue_count }}"
+          
+          if [ -n "$TOTAL_MSG" ]; then
+            echo "- 📨 **Mensajes Pendientes:** $TOTAL_MSG (en $QUEUE_COUNT colas)" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⏰ Información de Ejecución:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Ejecutado:** $(date)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Próxima verificación:** $(date -d '+6 hours')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Workflow:** ${{ github.workflow }} (#${{ github.run_number }})" >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify on Failure
+        if: failure()
+        run: |
+          echo "## ⚠️ ALERTA - Problemas Detectados" >> $GITHUB_STEP_SUMMARY
+          echo "Se han detectado problemas en el sistema de mensajería." >> $GITHUB_STEP_SUMMARY
+          echo "Revisa los logs anteriores para más detalles." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tiempo de fallo:** $(date)" >> $GITHUB_STEP_SUMMARY
